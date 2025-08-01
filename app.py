@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import openai
 from openai import OpenAI
@@ -24,6 +25,13 @@ conn = psycopg2.connect(
 # FastAPI app
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 # In-memory session context
 user_context = {}
 
@@ -99,6 +107,7 @@ def ask_question(request: QueryRequest):
         # Save session context
         user_context[session_id] = context + "\n" + question
 
+        # Case: Document OCR content (special handling for QA)
         if "dm_ocr_content" in sql_query.lower():
             if not rows:
                 return {"error": "No matching document found", "sql": sql_query}
@@ -119,8 +128,28 @@ def ask_question(request: QueryRequest):
 
             return {"sql": sql_query, "answer": final_answer}
 
-        return {"sql": sql_query, "result": rows}
+        # ✅ NEW: General SQL result → human-friendly natural language summary
+        summary_prompt = f"""
+        You are a helpful assistant. Turn this SQL result into a human-readable answer.
+
+        Original Question: {question}
+        SQL Query: {sql_query}
+        SQL Result: {rows}
+
+        Provide a clear and concise natural language answer based on the result.
+        """
+        summary_response = client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": summary_prompt}]
+        )
+        final_answer = summary_response.choices[0].message.content.strip()
+
+        return {
+            "sql": sql_query,
+            "result": rows,
+            "answer": final_answer  # ✅ Natural language response
+        }
 
     except Exception as e:
-        conn.rollback()  # 🔥 ADD THIS LINE to clear failed transaction
+        conn.rollback()
         return {"error": str(e), "sql": sql_query}
